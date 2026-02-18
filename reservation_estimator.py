@@ -1,163 +1,151 @@
 # -*- coding: utf-8 -*-
 """
-Studio Bday - Reservation Rate Estimator
-Checks competitor Naver Place booking pages
-to estimate availability rates across time slots
-
-Targets:
-  - 스튜디오생일 (us)
-  - 오늘, 우리 사진관 분당야탑 (main competitor)
-  - 오늘, 우리 사진관 분당서현 (competitor)
+Reservation Rate Estimator v3 - Playwright
+Clicks into Naver Place '예약' tab and extracts real time slots
 """
-import subprocess, re, json, sys, datetime, urllib.parse
+import json, sys, datetime, re, requests
 
-# Naver Place IDs (from naver.me links or place URLs)
-# These need to be set to actual Place IDs
 PLACES = {
-    "스튜디오생일": {
-        "place_id": "",  # Will be discovered
-        "search_name": "스튜디오생일 야탑",
-    },
-    "오늘우리 야탑": {
-        "place_id": "",
-        "search_name": "오늘우리사진관 야탑",
-    },
-    "오늘우리 서현": {
-        "place_id": "",
-        "search_name": "오늘우리사진관 서현",
-    },
+    "스튜디오생일": "1210788398",
+    "오늘우리 야탑": "2048985540",
+    "오늘우리 서현": "1391677364",
 }
+NOTIFY_BOT_TOKEN = '8465933562:AAFhXEjUd8Hzw5HwqVpwlUltSz4WdzdBPXQ'
+CHAT_ID = '1385089848'
 
-def fetch_url(url):
-    cmd = ["curl", "-s", "-L", "-A", "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)", url]
+def check_booking(place_id, label):
+    from playwright.sync_api import sync_playwright
+    
+    result = {"label": label, "place_id": place_id, "error": None, "reviews": {}, "slots": {}, "raw_booking": ""}
+    
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=10).stdout
-    except: return ""
-
-def discover_place_ids():
-    """Find Naver Place IDs from search results"""
-    results = {}
-    for label, info in PLACES.items():
-        kw = urllib.parse.quote(info["search_name"])
-        url = f"https://m.search.naver.com/search.naver?query={kw}"
-        html = fetch_url(url)
-
-        # Extract place ID from the first place_bluelink href
-        match = re.search(r'place\.naver\.com/place/(\d+)', html)
-        if match:
-            results[label] = match.group(1)
-    return results
-
-def check_booking_availability(place_id, target_date=None):
-    """Check a Naver Place booking page for available/unavailable slots"""
-    if not target_date:
-        target_date = datetime.date.today()
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            ctx = browser.new_context(
+                user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15",
+                viewport={"width": 390, "height": 844},
+            )
+            page = ctx.new_page()
+            
+            # Go directly to the booking tab URL
+            url = f"https://m.place.naver.com/place/{place_id}/booking"
+            page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            page.wait_for_timeout(3000)
+            
+            # First, grab review counts from the page header
+            text = page.inner_text('body')
+            rv = re.search(r'방문자\s*리뷰\s*(\d+)', text)
+            br = re.search(r'블로그\s*리뷰\s*(\d+)', text)
+            if rv: result["reviews"]["visitor"] = int(rv.group(1))
+            if br: result["reviews"]["blog"] = int(br.group(1))
+            
+            # Try clicking the actual reservation/booking link
+            booking_clicked = False
+            try:
+                # Look for booking buttons or links
+                booking_els = page.query_selector_all('a[href*="booking"], a[href*="reserve"], button:has-text("예약")')
+                for el in booking_els:
+                    txt = el.inner_text().strip()
+                    if '예약' in txt:
+                        el.click()
+                        page.wait_for_timeout(3000)
+                        booking_clicked = True
+                        break
+            except: pass
+            
+            if not booking_clicked:
+                # Try the tab navigation
+                try:
+                    tabs = page.query_selector_all('[role="tab"], a[class*="tab"]')
+                    for tab in tabs:
+                        if '예약' in tab.inner_text():
+                            tab.click()
+                            page.wait_for_timeout(3000)
+                            booking_clicked = True
+                            break
+                except: pass
+            
+            # Now extract booking data
+            text = page.inner_text('body')
+            
+            # Look for time slots
+            time_pattern = re.findall(r'(\d{1,2}:\d{2})', text)
+            if time_pattern:
+                result["raw_booking"] = f"시간대 발견: {', '.join(set(time_pattern))}"
+            
+            # Look for "마감" counts
+            closed = len(re.findall(r'마감', text))
+            avail = len(re.findall(r'예약\s*가능|선택\s*가능|예약하기', text))
+            
+            if closed + avail > 0:
+                result["slots"]["closed"] = closed
+                result["slots"]["available"] = avail
+                result["slots"]["total"] = closed + avail
+                result["slots"]["rate"] = round(closed / (closed + avail) * 100)
+            
+            # Try to find calendar/date with booking info
+            # Extract the full booking page text for analysis
+            result["raw_booking"] = text[:800]
+            
+            # Take a screenshot for debugging
+            page.screenshot(path=f"/tmp/booking_{place_id}.png")
+            
+            browser.close()
+    except Exception as e:
+        result["error"] = str(e)
     
-    date_str = target_date.strftime("%Y-%m-%d")
-    
-    # Naver Place booking/reservation page
-    url = f"https://m.place.naver.com/place/{place_id}/booking"
-    html = fetch_url(url)
-    
-    if not html:
-        return {"error": "fetch_failed", "slots": []}
-    
-    # Check if booking is available at all
-    if '예약' not in html and 'booking' not in html.lower():
-        return {"error": "no_booking_system", "slots": []}
-    
-    # Try to find time slot data in embedded JSON
-    # Naver often embeds booking data in script tags
-    slots_data = []
-    
-    # Pattern: Look for time slot objects
-    time_matches = re.findall(r'"time":\s*"(\d{2}:\d{2})".*?"available":\s*(true|false)', html, re.DOTALL)
-    if time_matches:
-        for time_str, avail in time_matches:
-            slots_data.append({
-                "time": time_str,
-                "available": avail == "true"
-            })
-    
-    # Alternative: count available/total from booking widget text
-    if not slots_data:
-        # Check for "마감" or "예약가능" text patterns
-        closed_count = len(re.findall(r'마감', html))
-        available_count = len(re.findall(r'예약\s*가능|선택\s*가능', html))
-        
-        if closed_count > 0 or available_count > 0:
-            total = closed_count + available_count
-            return {
-                "date": date_str,
-                "total_slots": total,
-                "closed_slots": closed_count,
-                "available_slots": available_count,
-                "booking_rate": round(closed_count / max(total, 1) * 100),
-                "raw": True
-            }
-    
-    if slots_data:
-        total = len(slots_data)
-        booked = sum(1 for s in slots_data if not s["available"])
-        return {
-            "date": date_str,
-            "total_slots": total,
-            "closed_slots": booked,
-            "available_slots": total - booked,
-            "booking_rate": round(booked / max(total, 1) * 100),
-            "slots": slots_data
-        }
-    
-    return {"date": date_str, "error": "no_slot_data", "html_length": len(html)}
-
-def run_estimation():
-    """Main estimation routine"""
-    place_ids = discover_place_ids()
-    
-    results = {}
-    for label, pid in place_ids.items():
-        if pid:
-            # Check today and next 3 days
-            days_data = []
-            for offset in range(4):
-                target = datetime.date.today() + datetime.timedelta(days=offset)
-                data = check_booking_availability(pid, target)
-                days_data.append(data)
-            results[label] = {"place_id": pid, "days": days_data}
-        else:
-            results[label] = {"error": "place_id_not_found"}
-    
-    return results
+    return result
 
 def format_report(results):
-    msg = "📅 예약률 추정 리포트\n"
-    msg += "─" * 30 + "\n"
+    msg = "📅 경쟁사 예약/리뷰 비교 리포트\n"
+    msg += f"📆 {datetime.date.today()}\n"
+    msg += "═" * 28 + "\n\n"
     
-    for label, data in results.items():
-        if "error" in data:
-            msg += f"\n{label}: ❌ {data['error']}\n"
-            continue
+    for r in results:
+        icon = "👉" if "스튜디오" in r["label"] else "🎯"
+        msg += f"{icon} {r['label']}\n"
         
-        msg += f"\n📍 {label} (Place ID: {data['place_id']})\n"
-        for day in data["days"]:
-            if "error" in day:
-                date = day.get("date", "?")
-                msg += f"  {date}: {day['error']}\n"
-            else:
-                rate = day.get("booking_rate", 0)
-                bar_filled = round(rate / 10)
-                bar = "█" * bar_filled + "░" * (10 - bar_filled)
-                msg += f"  {day['date']}: {bar} {rate}%\n"
+        # Reviews
+        rv = r.get("reviews", {})
+        if rv:
+            v = rv.get("visitor", "?")
+            b = rv.get("blog", "?")
+            msg += f"  📝 방문자리뷰: {v} | 블로그: {b}\n"
+        
+        # Slot data
+        slots = r.get("slots", {})
+        if slots and slots.get("total", 0) > 0:
+            rate = slots["rate"]
+            bar_filled = round(rate / 10)
+            bar = "█" * bar_filled + "░" * (10 - bar_filled)
+            msg += f"  📊 예약률: {bar} {rate}%\n"
+            msg += f"     (마감 {slots['closed']} / 가능 {slots['available']})\n"
+        
+        if r.get("error"):
+            msg += f"  ❌ {r['error'][:50]}\n"
+        
+        msg += "\n"
     
     return msg
 
+def send_telegram(msg):
+    url = f"https://api.telegram.org/bot{NOTIFY_BOT_TOKEN}/sendMessage"
+    try:
+        requests.post(url, json={"chat_id": CHAT_ID, "text": msg}, timeout=10)
+    except: pass
+
 if __name__ == "__main__":
-    if "--discover" in sys.argv:
-        ids = discover_place_ids()
-        for label, pid in ids.items():
-            print(f"{label}: {pid or 'not found'}")
-    elif "--json" in sys.argv:
-        print(json.dumps(run_estimation(), ensure_ascii=False, indent=2))
+    results = [check_booking(pid, label) for label, pid in PLACES.items()]
+    
+    if "--json" in sys.argv:
+        print(json.dumps(results, ensure_ascii=False, indent=2))
+    elif "--send" in sys.argv:
+        msg = format_report(results)
+        send_telegram(msg)
+        print("Sent!")
     else:
-        results = run_estimation()
         print(format_report(results))
+        # Also print raw data for debugging
+        for r in results:
+            print(f"\n--- {r['label']} raw ---")
+            print(r.get("raw_booking", "")[:300])
