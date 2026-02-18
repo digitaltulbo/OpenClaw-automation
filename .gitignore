@@ -1,0 +1,7 @@
+config.json
+credentials.json
+oauth_credentials.json
+firebase_config.json
+drive_token.pickle
+*.pickle
+__pycache__/
