@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Reservation Rate Estimator v5 - Today + Tomorrow only
-Uses Playwright with exact Naver booking selectors
+Reservation Rate Estimator v6
+- Uses Playwright click navigation (not regex URL parsing)
+- Goes Place page → clicks 예약 tab → clicks booking service → extracts slots
+- Only today + tomorrow
 """
 import json, sys, datetime, re, requests
 
@@ -27,8 +29,8 @@ def check_booking(place_id, label):
             )
             page = ctx.new_page()
             
-            # Step 1: Place booking tab
-            page.goto(f"https://m.place.naver.com/place/{place_id}/booking", wait_until="domcontentloaded", timeout=15000)
+            # Step 1: Go to Place page (not /booking, main page)
+            page.goto(f"https://m.place.naver.com/place/{place_id}/home", wait_until="networkidle", timeout=20000)
             page.wait_for_timeout(2000)
             
             # Extract reviews
@@ -38,27 +40,91 @@ def check_booking(place_id, label):
             if rv: result["reviews"]["visitor"] = int(rv.group(1))
             if br: result["reviews"]["blog"] = int(br.group(1))
             
-            # Step 2: Find booking URL
-            content = page.content()
-            bk_match = re.search(r'(https://booking\.naver\.com/booking/[^"\']+)', content)
-            if not bk_match:
-                result["error"] = "booking_url_not_found"
+            # Step 2: Click the "예약" tab/button to get to booking
+            booking_found = False
+            
+            # Method 1: Look for booking.naver.com link in rendered DOM
+            try:
+                links = page.query_selector_all('a')
+                for link in links:
+                    href = link.get_attribute('href') or ''
+                    if 'booking.naver.com' in href:
+                        page.goto(href, wait_until="networkidle", timeout=15000)
+                        page.wait_for_timeout(3000)
+                        booking_found = True
+                        break
+            except: pass
+            
+            # Method 2: Click the 예약 tab text
+            if not booking_found:
+                try:
+                    tabs = page.query_selector_all('a, button, span')
+                    for tab in tabs:
+                        txt = tab.inner_text().strip()
+                        if txt == '예약':
+                            tab.click()
+                            page.wait_for_timeout(3000)
+                            
+                            # After clicking, look for booking.naver.com link again
+                            links2 = page.query_selector_all('a')
+                            for link2 in links2:
+                                href2 = link2.get_attribute('href') or ''
+                                if 'booking.naver.com' in href2:
+                                    page.goto(href2, wait_until="networkidle", timeout=15000)
+                                    page.wait_for_timeout(3000)
+                                    booking_found = True
+                                    break
+                            if booking_found: break
+                            
+                            # Or check if we're already on booking page
+                            if 'booking.naver.com' in page.url:
+                                booking_found = True
+                                break
+                except: pass
+            
+            # Method 3: Direct URL construction
+            if not booking_found:
+                try:
+                    page.goto(f"https://m.place.naver.com/place/{place_id}/booking", wait_until="networkidle", timeout=15000)
+                    page.wait_for_timeout(3000)
+                    
+                    # Click any element that leads to booking.naver.com
+                    els = page.query_selector_all('a[href*="booking"], [class*="booking"], [class*="reserve"]')
+                    if els:
+                        els[0].click()
+                        page.wait_for_timeout(3000)
+                        booking_found = 'booking.naver.com' in page.url
+                    
+                    # Try clicking "예약" button within the page
+                    if not booking_found:
+                        btns = page.query_selector_all('a, button')
+                        for btn in btns:
+                            try:
+                                txt = btn.inner_text().strip()
+                                href = btn.get_attribute('href') or ''
+                                if ('예약' in txt and len(txt) < 20) or 'booking.naver.com' in href:
+                                    if 'booking.naver.com' in href:
+                                        page.goto(href, wait_until="networkidle", timeout=15000)
+                                    else:
+                                        btn.click()
+                                    page.wait_for_timeout(3000)
+                                    booking_found = True
+                                    break
+                            except: continue
+                except: pass
+            
+            if not booking_found:
+                result["error"] = "booking_page_unreachable"
                 browser.close()
                 return result
             
-            booking_url = bk_match.group(1)
-            
-            # Step 3: Go to booking widget
-            page.goto(booking_url, wait_until="domcontentloaded", timeout=15000)
-            page.wait_for_timeout(3000)
-            
-            # Step 4: Extract TODAY's slots
+            # Step 3: Now on booking.naver.com - extract today's slots
             today_data = extract_slots(page)
             today_data["date"] = str(datetime.date.today())
             today_data["day_label"] = "오늘"
             result["days"].append(today_data)
             
-            # Step 5: Click TOMORROW on calendar
+            # Step 4: Click tomorrow on calendar
             tomorrow = datetime.date.today() + datetime.timedelta(days=1)
             try:
                 date_els = page.query_selector_all('.calendar_date:not(.unselectable):not(.prev_month):not(.next_month)')
@@ -130,7 +196,7 @@ def format_report(results):
                 if avail_times:
                     msg += f"    ✅ 가능: {', '.join(avail_times)}\n"
             else:
-                msg += f"  {lbl}: ℹ️ 슬롯 없음\n"
+                msg += f"  {lbl}: ℹ️ 슬롯 데이터 없음\n"
     return msg
 
 def send_telegram(msg):
