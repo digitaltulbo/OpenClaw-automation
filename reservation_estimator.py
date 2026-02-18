@@ -1,11 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Reservation Rate Estimator v4 - Precise Naver Booking Scraper
-Uses exact selectors discovered from browser inspection:
-  - btn_time => available slot
-  - btn_time unselectable => booked slot
-  - calendar_date => selectable date
-  - calendar_date dayoff => holiday/closed
+Reservation Rate Estimator v5 - Today + Tomorrow only
+Uses Playwright with exact Naver booking selectors
 """
 import json, sys, datetime, re, requests
 
@@ -20,14 +16,7 @@ CHAT_ID = '1385089848'
 def check_booking(place_id, label):
     from playwright.sync_api import sync_playwright
     
-    result = {
-        "label": label,
-        "place_id": place_id,
-        "reviews": {},
-        "booking_url": None,
-        "days": [],
-        "error": None,
-    }
+    result = {"label": label, "place_id": place_id, "reviews": {}, "days": [], "error": None}
     
     try:
         with sync_playwright() as p:
@@ -38,77 +27,52 @@ def check_booking(place_id, label):
             )
             page = ctx.new_page()
             
-            # Step 1: Go to Place booking tab
-            url = f"https://m.place.naver.com/place/{place_id}/booking"
-            page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            # Step 1: Place booking tab
+            page.goto(f"https://m.place.naver.com/place/{place_id}/booking", wait_until="domcontentloaded", timeout=15000)
             page.wait_for_timeout(2000)
             
-            # Extract review counts
+            # Extract reviews
             text = page.inner_text('body')
             rv = re.search(r'방문자\s*리뷰\s*(\d+)', text)
             br = re.search(r'블로그\s*리뷰\s*(\d+)', text)
             if rv: result["reviews"]["visitor"] = int(rv.group(1))
             if br: result["reviews"]["blog"] = int(br.group(1))
             
-            # Step 2: Click the booking service item (e.g. "셀프촬영 예약", "50분의 셀프 촬영")
-            booking_links = page.query_selector_all('a[href*="booking.naver.com"]')
-            booking_url = None
-            
-            if not booking_links:
-                # Try clicking any 예약 button
-                reserve_btns = page.query_selector_all('a:has-text("예약"), button:has-text("예약")')
-                for btn in reserve_btns:
-                    href = btn.get_attribute('href')
-                    if href and 'booking.naver.com' in href:
-                        booking_url = href
-                        break
-            else:
-                booking_url = booking_links[0].get_attribute('href')
-            
-            if not booking_url:
-                # Last resort: find booking URL in page source
-                content = page.content()
-                bk_match = re.search(r'(https://booking\.naver\.com/booking/[^"\']+)', content)
-                if bk_match:
-                    booking_url = bk_match.group(1)
-            
-            if not booking_url:
+            # Step 2: Find booking URL
+            content = page.content()
+            bk_match = re.search(r'(https://booking\.naver\.com/booking/[^"\']+)', content)
+            if not bk_match:
                 result["error"] = "booking_url_not_found"
                 browser.close()
                 return result
             
-            result["booking_url"] = booking_url
+            booking_url = bk_match.group(1)
             
-            # Step 3: Navigate to the booking widget
+            # Step 3: Go to booking widget
             page.goto(booking_url, wait_until="domcontentloaded", timeout=15000)
             page.wait_for_timeout(3000)
             
-            # Step 4: Extract data for multiple dates
-            # First, get today's slots
+            # Step 4: Extract TODAY's slots
             today_data = extract_slots(page)
             today_data["date"] = str(datetime.date.today())
+            today_data["day_label"] = "오늘"
             result["days"].append(today_data)
             
-            # Click through next few dates on the calendar
-            for offset in range(1, 5):
-                target_date = datetime.date.today() + datetime.timedelta(days=offset)
-                
-                # Try clicking the calendar date
-                day_num = target_date.day
-                try:
-                    # Find all calendar_date elements
-                    date_els = page.query_selector_all('.calendar_date:not(.unselectable):not(.prev_month):not(.next_month)')
-                    for el in date_els:
-                        el_text = el.inner_text().strip()
-                        if el_text == str(day_num):
-                            el.click()
-                            page.wait_for_timeout(1500)
-                            day_data = extract_slots(page)
-                            day_data["date"] = str(target_date)
-                            result["days"].append(day_data)
-                            break
-                except Exception as e:
-                    result["days"].append({"date": str(target_date), "error": str(e)[:50]})
+            # Step 5: Click TOMORROW on calendar
+            tomorrow = datetime.date.today() + datetime.timedelta(days=1)
+            try:
+                date_els = page.query_selector_all('.calendar_date:not(.unselectable):not(.prev_month):not(.next_month)')
+                for el in date_els:
+                    if el.inner_text().strip() == str(tomorrow.day):
+                        el.click()
+                        page.wait_for_timeout(1500)
+                        tmr_data = extract_slots(page)
+                        tmr_data["date"] = str(tomorrow)
+                        tmr_data["day_label"] = "내일"
+                        result["days"].append(tmr_data)
+                        break
+            except Exception as e:
+                result["days"].append({"date": str(tomorrow), "day_label": "내일", "error": str(e)[:50]})
             
             browser.close()
     except Exception as e:
@@ -117,26 +81,15 @@ def check_booking(place_id, label):
     return result
 
 def extract_slots(page):
-    """Extract time slots from the current booking page state"""
     data = {"total": 0, "booked": 0, "available": 0, "rate": 0, "slots": []}
-    
     try:
-        # Find all time buttons
         all_btns = page.query_selector_all('.btn_time, button[class*="btn_time"]')
-        
         for btn in all_btns:
             time_text = btn.inner_text().strip()
-            if ':' not in time_text:
-                continue
-            
+            if ':' not in time_text: continue
             cls = btn.get_attribute('class') or ''
-            is_booked = 'unselectable' in cls
-            disabled = btn.get_attribute('disabled')
-            
-            data["slots"].append({
-                "time": time_text,
-                "booked": is_booked or disabled is not None,
-            })
+            is_booked = 'unselectable' in cls or btn.get_attribute('disabled') is not None
+            data["slots"].append({"time": time_text, "booked": is_booked})
         
         if data["slots"]:
             data["total"] = len(data["slots"])
@@ -145,66 +98,52 @@ def extract_slots(page):
             data["rate"] = round(data["booked"] / data["total"] * 100) if data["total"] > 0 else 0
     except Exception as e:
         data["error"] = str(e)[:50]
-    
     return data
 
 def format_report(results):
-    msg = "📅 경쟁사 예약률 비교 리포트\n"
-    msg += f"📆 {datetime.date.today()}\n"
-    msg += "═" * 28 + "\n\n"
-    
+    msg = "📅 예약 현황 비교\n"
     for r in results:
         icon = "👉" if "스튜디오" in r["label"] else "🎯"
-        msg += f"{icon} {r['label']}\n"
-        
-        # Reviews
+        msg += f"\n{icon} {r['label']}"
         rv = r.get("reviews", {})
         if rv:
-            v = rv.get("visitor", "?")
-            b = rv.get("blog", "?")
-            msg += f"  📝 리뷰: 방문자 {v} / 블로그 {b}\n"
+            msg += f" (리뷰 {rv.get('visitor','?')})"
+        msg += "\n"
         
         if r.get("error"):
-            msg += f"  ❌ {r['error']}\n\n"
+            msg += f"  ❌ {r['error']}\n"
             continue
         
-        # Per-day data
         for day in r.get("days", []):
+            lbl = day.get("day_label", day.get("date",""))
             if "error" in day:
-                msg += f"  {day['date']}: ❌ {day['error']}\n"
+                msg += f"  {lbl}: ❌\n"
                 continue
-            
             if day.get("total", 0) > 0:
                 rate = day["rate"]
-                bar_filled = round(rate / 10)
-                bar = "█" * bar_filled + "░" * (10 - bar_filled)
-                msg += f"  {day['date']}: {bar} {rate}%"
-                msg += f" ({day['booked']}마감/{day['total']}전체)\n"
-                
-                # Show slot details
-                for s in day.get("slots", []):
-                    st = "❌" if s["booked"] else "✅"
-                    msg += f"    {st} {s['time']}\n"
+                bar = "█" * round(rate/10) + "░" * (10-round(rate/10))
+                msg += f"  {lbl}: {bar} {rate}% ({day['booked']}마감/{day['total']}전체)\n"
+                booked_times = [s["time"] for s in day.get("slots",[]) if s["booked"]]
+                avail_times = [s["time"] for s in day.get("slots",[]) if not s["booked"]]
+                if booked_times:
+                    msg += f"    ❌ 마감: {', '.join(booked_times)}\n"
+                if avail_times:
+                    msg += f"    ✅ 가능: {', '.join(avail_times)}\n"
             else:
-                msg += f"  {day['date']}: ℹ️ 슬롯 데이터 없음\n"
-        msg += "\n"
-    
+                msg += f"  {lbl}: ℹ️ 슬롯 없음\n"
     return msg
 
 def send_telegram(msg):
     url = f"https://api.telegram.org/bot{NOTIFY_BOT_TOKEN}/sendMessage"
-    try:
-        requests.post(url, json={"chat_id": CHAT_ID, "text": msg}, timeout=10)
+    try: requests.post(url, json={"chat_id": CHAT_ID, "text": msg}, timeout=10)
     except: pass
 
 if __name__ == "__main__":
     results = [check_booking(pid, label) for label, pid in PLACES.items()]
-    
     if "--json" in sys.argv:
         print(json.dumps(results, ensure_ascii=False, indent=2))
     elif "--send" in sys.argv:
-        msg = format_report(results)
-        send_telegram(msg)
+        send_telegram(format_report(results))
         print("Sent!")
     else:
         print(format_report(results))
