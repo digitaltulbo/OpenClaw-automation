@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>스튜디오생일 대시보드</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #0f0f1a;
+            color: #e8e8f0;
+            min-height: 100vh;
+        }
+        .header {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            padding: 24px 32px;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .header h1 {
+            font-size: 22px;
+            font-weight: 700;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .header .status {
+            font-size: 13px;
+            color: #6c7293;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 20px;
+            padding: 24px;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        .card {
+            background: linear-gradient(145deg, #1a1a2e 0%, #16213e 100%);
+            border-radius: 16px;
+            padding: 24px;
+            border: 1px solid rgba(255,255,255,0.05);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 32px rgba(102, 126, 234, 0.15);
+        }
+        .card h2 {
+            font-size: 15px;
+            color: #8b8fa8;
+            margin-bottom: 16px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .card .big-number {
+            font-size: 42px;
+            font-weight: 800;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .card .sub { font-size: 13px; color: #6c7293; margin-top: 4px; }
+        .chart-container {
+            position: relative;
+            height: 250px;
+        }
+        .insights {
+            grid-column: 1 / -1;
+        }
+        .insight-item {
+            background: rgba(102, 126, 234, 0.08);
+            border-left: 3px solid #667eea;
+            padding: 12px 16px;
+            margin-bottom: 8px;
+            border-radius: 0 8px 8px 0;
+            font-size: 14px;
+        }
+        .insight-item.warning {
+            border-left-color: #f0ad4e;
+            background: rgba(240, 173, 78, 0.08);
+        }
+        .insight-item.success {
+            border-left-color: #4ade80;
+            background: rgba(74, 222, 128, 0.08);
+        }
+        .stats-row {
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+        .stat-item {
+            flex: 1;
+            min-width: 100px;
+            text-align: center;
+            padding: 16px;
+            background: rgba(255,255,255,0.03);
+            border-radius: 12px;
+        }
+        .stat-item .label { font-size: 12px; color: #6c7293; }
+        .stat-item .value { font-size: 24px; font-weight: 700; margin-top: 4px; }
+        .loading { text-align: center; padding: 40px; color: #6c7293; }
+        @media (max-width: 768px) {
+            .grid { grid-template-columns: 1fr; padding: 12px; }
+            .header { padding: 16px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>📊 스튜디오생일 대시보드</h1>
+        <div class="status" id="lastUpdate">로딩 중...</div>
+    </div>
+
+    <div class="grid">
+        <!-- Summary Cards -->
+        <div class="card" id="summaryCard">
+            <h2>📋 데이터 현황</h2>
+            <div class="stats-row" id="summaryStats">
+                <div class="loading">데이터 로딩 중...</div>
+            </div>
+        </div>
+
+        <!-- Insights -->
+        <div class="card insights" id="insightsCard">
+            <h2>💡 AI 인사이트</h2>
+            <div id="insightsList">
+                <div class="loading">분석 중...</div>
+            </div>
+        </div>
+
+        <!-- Reservation Trend Chart -->
+        <div class="card">
+            <h2>📈 예약률 추이</h2>
+            <div class="chart-container">
+                <canvas id="reservationChart"></canvas>
+            </div>
+        </div>
+
+        <!-- Ranking Trend Chart -->
+        <div class="card">
+            <h2>🏆 키워드 순위 변동</h2>
+            <div class="chart-container">
+                <canvas id="rankingChart"></canvas>
+            </div>
+        </div>
+
+        <!-- Weekday Stats Chart -->
+        <div class="card">
+            <h2>📊 요일별 평균 예약률</h2>
+            <div class="chart-container">
+                <canvas id="weekdayChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API = '';
+        const COLORS = {
+            '스튜디오생일': '#667eea',
+            '오늘우리 야탑': '#f97316',
+            '오늘우리 서현': '#ef4444',
+        };
+        const KW_COLORS = ['#667eea', '#4ade80', '#f97316'];
+
+        Chart.defaults.color = '#8b8fa8';
+        Chart.defaults.borderColor = 'rgba(255,255,255,0.05)';
+
+        async function loadSummary() {
+            try {
+                const res = await fetch(API + '/api/summary');
+                const data = await res.json();
+                document.getElementById('summaryStats').innerHTML = `
+                    <div class="stat-item">
+                        <div class="label">예약 기록</div>
+                        <div class="value" style="color:#667eea">${data.total_reservations || 0}</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="label">순위 기록</div>
+                        <div class="value" style="color:#4ade80">${data.total_rankings || 0}</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="label">키워드 데이터</div>
+                        <div class="value" style="color:#f97316">${data.total_keywords || 0}</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="label">수집 기간</div>
+                        <div class="value" style="font-size:14px;color:#8b8fa8">
+                            ${data.date_range?.from || '시작 전'}<br>~ ${data.date_range?.to || ''}
+                        </div>
+                    </div>
+                `;
+                document.getElementById('lastUpdate').textContent = 
+                    `마지막 업데이트: ${new Date().toLocaleString('ko-KR')}`;
+            } catch (e) {
+                document.getElementById('summaryStats').innerHTML = 
+                    '<div class="loading">⚠️ 서버 연결 실패</div>';
+            }
+        }
+
+        async function loadInsights() {
+            try {
+                const res = await fetch(API + '/api/insights');
+                const data = await res.json();
+                const html = data.map(i => {
+                    const cls = i.type === 'ranking' && i.change > 0 ? 'success' : 
+                                i.type === 'ranking' && i.change < 0 ? 'warning' : '';
+                    return `<div class="insight-item ${cls}">${i.message}</div>`;
+                }).join('');
+                document.getElementById('insightsList').innerHTML = html || 
+                    '<div class="insight-item">데이터 축적 중... 2주 후 인사이트가 생성됩니다.</div>';
+            } catch (e) {
+                document.getElementById('insightsList').innerHTML = 
+                    '<div class="insight-item">⚠️ 인사이트 로딩 실패</div>';
+            }
+        }
+
+        async function loadReservationChart() {
+            try {
+                const res = await fetch(API + '/api/trends?days=30');
+                const data = await res.json();
+                const dates = Object.keys(data).sort();
+                
+                if (dates.length === 0) {
+                    document.getElementById('reservationChart').parentElement.innerHTML = 
+                        '<div class="loading">📊 데이터 축적 중 (매일 9시 수집)</div>';
+                    return;
+                }
+
+                const datasets = [];
+                for (const [studio, color] of Object.entries(COLORS)) {
+                    const values = dates.map(d => {
+                        const items = data[d]?.[studio] || [];
+                        const rates = items.filter(i => i.rate > 0).map(i => i.rate);
+                        return rates.length ? rates.reduce((a,b) => a+b) / rates.length : null;
+                    });
+                    datasets.push({
+                        label: studio,
+                        data: values,
+                        borderColor: color,
+                        backgroundColor: color + '20',
+                        fill: true,
+                        tension: 0.4,
+                        pointRadius: 3,
+                    });
+                }
+
+                new Chart(document.getElementById('reservationChart'), {
+                    type: 'line',
+                    data: { labels: dates.map(d => d.slice(5)), datasets },
+                    options: {
+                        responsive: true, maintainAspectRatio: false,
+                        scales: { y: { beginAtZero: true, max: 100,
+                            ticks: { callback: v => v + '%' }
+                        }},
+                        plugins: { legend: { position: 'bottom' }}
+                    }
+                });
+            } catch (e) {
+                document.getElementById('reservationChart').parentElement.innerHTML = 
+                    '<div class="loading">⚠️ 차트 로딩 실패</div>';
+            }
+        }
+
+        async function loadRankingChart() {
+            try {
+                const res = await fetch(API + '/api/rankings?days=30');
+                const data = await res.json();
+                const keywords = Object.keys(data);
+                
+                if (keywords.length === 0) {
+                    document.getElementById('rankingChart').parentElement.innerHTML = 
+                        '<div class="loading">🏆 데이터 축적 중 (매일 9시 수집)</div>';
+                    return;
+                }
+
+                const allDates = [...new Set(keywords.flatMap(k => data[k].map(d => d.date)))].sort();
+                const datasets = keywords.map((kw, i) => ({
+                    label: kw,
+                    data: allDates.map(d => {
+                        const found = data[kw].find(r => r.date === d);
+                        return found ? found.rank : null;
+                    }),
+                    borderColor: KW_COLORS[i % KW_COLORS.length],
+                    tension: 0.3,
+                    pointRadius: 4,
+                }));
+
+                new Chart(document.getElementById('rankingChart'), {
+                    type: 'line',
+                    data: { labels: allDates.map(d => d.slice(5)), datasets },
+                    options: {
+                        responsive: true, maintainAspectRatio: false,
+                        scales: { y: { reverse: true, beginAtZero: false, min: 1, max: 10,
+                            ticks: { stepSize: 1, callback: v => v + '위' }
+                        }},
+                        plugins: { legend: { position: 'bottom' }}
+                    }
+                });
+            } catch (e) {
+                document.getElementById('rankingChart').parentElement.innerHTML = 
+                    '<div class="loading">⚠️ 차트 로딩 실패</div>';
+            }
+        }
+
+        async function loadWeekdayChart() {
+            try {
+                const res = await fetch(API + '/api/weekday-stats');
+                const data = await res.json();
+                const days = ['일', '월', '화', '수', '목', '금', '토'];
+                const presentDays = days.filter(d => data[d]);
+
+                if (presentDays.length === 0) {
+                    document.getElementById('weekdayChart').parentElement.innerHTML = 
+                        '<div class="loading">📊 일주일 이상 데이터 필요</div>';
+                    return;
+                }
+
+                const datasets = Object.entries(COLORS).map(([studio, color]) => ({
+                    label: studio,
+                    data: presentDays.map(d => data[d]?.[studio]?.avg_rate || 0),
+                    backgroundColor: color + '80',
+                    borderColor: color,
+                    borderWidth: 1,
+                    borderRadius: 6,
+                }));
+
+                new Chart(document.getElementById('weekdayChart'), {
+                    type: 'bar',
+                    data: { labels: presentDays, datasets },
+                    options: {
+                        responsive: true, maintainAspectRatio: false,
+                        scales: { y: { beginAtZero: true, max: 100,
+                            ticks: { callback: v => v + '%' }
+                        }},
+                        plugins: { legend: { position: 'bottom' }}
+                    }
+                });
+            } catch (e) {
+                document.getElementById('weekdayChart').parentElement.innerHTML = 
+                    '<div class="loading">⚠️ 차트 로딩 실패</div>';
+            }
+        }
+
+        // Load all
+        loadSummary();
+        loadInsights();
+        loadReservationChart();
+        loadRankingChart();
+        loadWeekdayChart();
+
+        // Auto-refresh every 5 minutes
+        setInterval(() => {
+            loadSummary();
+            loadInsights();
+        }, 5 * 60 * 1000);
+    </script>
+</body>
+</html>
