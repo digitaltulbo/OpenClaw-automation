@@ -8,9 +8,17 @@
     <array>
         <string>/opt/homebrew/bin/cloudflared</string>
         <string>tunnel</string>
+        <string>--no-autoupdate</string>
         <string>--url</string>
         <string>http://localhost:8080</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>NO_AUTOUPDATE</key>
+        <string>true</string>
+        <key>HOME</key>
+        <string>/tmp/cloudflared-clean</string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
