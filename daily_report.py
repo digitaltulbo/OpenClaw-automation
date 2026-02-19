@@ -11,6 +11,15 @@ SCRIPTS_DIR = '/home/openclaw/.openclaw/skills/seo-optimizer/scripts'
 HISTORY_FILE = '/home/openclaw/.openclaw/skills/seo-optimizer/rank_history.json'
 NOTIFY_BOT_TOKEN = '8465933562:AAFhXEjUd8Hzw5HwqVpwlUltSz4WdzdBPXQ'
 CHAT_ID = '1385089848'
+DASHBOARD_URL_FILE = '/home/openclaw/.openclaw/dashboard_url.txt'
+
+def get_dashboard_url():
+    """대시보드 터널 URL 읽기"""
+    try:
+        with open(DASHBOARD_URL_FILE, 'r') as f:
+            return f.read().strip()
+    except:
+        return None
 
 def run_script(name, args=None, venv=False):
     python = '/home/openclaw/playwright-env/bin/python' if venv else 'python3'
@@ -133,6 +142,11 @@ def run_report():
         msg += "✅ 일일+주간 통합 리포트 | 매일 오전 9시"
     else:
         msg += "✅ 일일 리포트 | 매일 오전 9시"
+    
+    # Dashboard link
+    dash_url = get_dashboard_url()
+    if dash_url:
+        msg += f"\n📊 대시보드: {dash_url}"
     
     # ── 4. Store to DB (silent) ──
     store_to_db(rank_output, reservation_json, ads_json)
